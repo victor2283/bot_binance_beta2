@@ -1,14 +1,13 @@
 import config
 from binance.spot import Spot
-import time
 import pandas as pd
 import numpy as np
-import datetime
-import matplotlib.dates as mdates
-from mplfinance.original_flavor import candlestick_ohlc
-from pprint import pprint
-import pandas as pd
 import math
+import datetime
+import time
+from mplfinance.original_flavor import candlestick_ohlc
+import matplotlib.dates as mdates
+from pprint import pprint
 
 
 class BotBinance:
@@ -29,6 +28,10 @@ class BotBinance:
         self.perc_priceSide=perc_priceSide
         self.nbdevup=nbdevup
         self.nbdevdn=nbdevdn
+        self.sTrade=0
+        self.last_order_tradeId=0
+        self.last_trend= ""
+        self.last_price_market =0
         self._client = Spot(self.__api_key, self.__api_secret)
         
     def _request(self, endpoint: str, parameters: dict = None):
@@ -36,28 +39,15 @@ class BotBinance:
             response= getattr(self._client, endpoint)
             return response() if parameters is None else response(**parameters)
         except Exception as e:  # Manejar otros errores de forma diferente
-            print(f'Error inesperado: {e}')
-            raise e  # Propagar la excepción para que la maneje la función llamadora
-    def symbol_price(self, pair: str = None):
-        symbol = self.symbol if pair is None else pair
-        return float(self._request("ticker_price", {"symbol": symbol.upper()}).get('price'))
+            if 'Order would immediately trigger' in str(e) and endpoint == 'new_order':
+                print("Error en new order:", e)
+                stopPriceSide, priceSide = self.stop_price(side=parameters['side'], price=self.symbol_price(self.symbol), perc_stop=self.perc_stopSide, perc_price=self.perc_priceSide)    
+                self.new_order(side=parameters['side'], type="STOP_LOSS_LIMIT", quantity= parameters['quantity'], stopPrice= stopPriceSide, price=priceSide, mode=self.mode_Soft)
+                
+            else:
+                print(f'Error inesperado: {e}')
+                raise e  # Propagar la excepción para que la maneje la función llamadora
     
-    def candlestick(self):
-        candles = self._request(endpoint="klines", parameters={
-                                "symbol": self.symbol, "interval": self.interval, "limit": self.limit})
-        return list(map(lambda v: {'Open_time': int(v[0]), 'Open_price': float(v[1]), 'High_price': float(v[2]), 'Low_price': float(v[3]), 'Close_price': float(v[4]), "Volume": float(v[5])}, candles))
-
-    def create_dataframe(self, candles):
-        df = pd.DataFrame({
-            'Datetime': [datetime.datetime.fromtimestamp(candle['Open_time'] / 1000) for candle in candles],
-            'Open': [candle['Open_price'] for candle in candles],
-            'High': [candle['High_price'] for candle in candles],
-            'Low': [candle['Low_price'] for candle in candles],
-            'Close': [candle['Close_price'] for candle in candles],
-            'Volume': [candle['Volume'] for candle in candles],
-        })
-        df.set_index('Datetime', inplace=True)
-        return df
     
     def new_order(self, side: str,  type: str, quantity: float = 0, price: float = 0, stopPrice: float = 0, mode: int = 1):
         timestamp = int(time.time()*1000)
@@ -96,6 +86,26 @@ class BotBinance:
                 return  self._request(endpoint="new_order", parameters=params)
             else:
                 return  self._request(endpoint="new_order_test", parameters=params)
+    def symbol_price(self, pair: str = None):
+        symbol = self.symbol if pair is None else pair
+        return float(self._request("ticker_price", {"symbol": symbol.upper()}).get('price'))
+    
+    def candlestick(self):
+        candles = self._request(endpoint="klines", parameters={
+                                "symbol": self.symbol, "interval": self.interval, "limit": self.limit})
+        return list(map(lambda v: {'Open_time': int(v[0]), 'Open_price': float(v[1]), 'High_price': float(v[2]), 'Low_price': float(v[3]), 'Close_price': float(v[4]), "Volume": float(v[5])}, candles))
+
+    def create_dataframe(self, candles):
+        df = pd.DataFrame({
+            'Datetime': [datetime.datetime.fromtimestamp(candle['Open_time'] / 1000) for candle in candles],
+            'Open': [candle['Open_price'] for candle in candles],
+            'High': [candle['High_price'] for candle in candles],
+            'Low': [candle['Low_price'] for candle in candles],
+            'Close': [candle['Close_price'] for candle in candles],
+            'Volume': [candle['Volume'] for candle in candles],
+        })
+        df.set_index('Datetime', inplace=True)
+        return df
     def get_open_orders(self):
         return  self._request(endpoint="get_open_orders", parameters={"symbol": self.symbol})    
     def cancel_orderId(self, orderId: int):
@@ -456,7 +466,7 @@ class BotBinance:
         # Ajustar el espaciado entre subgráficos
         fig.tight_layout(pad=0.8)
         return fig
-    def update_data(self, last_trend, last_price_market, last_order_tradeId, sTrade):
+    def update_data(self):
         asset_primary=self.asset_primary
         asset_secundary = self.asset_secundary
         perc_binance= self.perc_binance
@@ -528,26 +538,26 @@ class BotBinance:
         if float(quantity) >  float(price_min_sell) and float(fiat/ price_market) < float(quantity) and order_trade['isBuyer'] == True:
             perc_binance = (float(order_trade['commission']) / float(order_trade['qty'])) * 100
             price_buy = float(order_trade["price"])
-            if order_trade['orderId'] != last_order_tradeId:
-                sTrade = sTrade + 1
-                last_order_tradeId= order_trade['orderId']
+            if order_trade['orderId'] != self.last_order_tradeId:
+                self.sTrade = self.sTrade + 1
+                self.last_order_tradeId= order_trade['orderId']
         elif  order_trade['isBuyer'] == False: 
             price_buy = 0
-            if order_trade['orderId'] != last_order_tradeId:
-                sTrade = sTrade + 1
-                last_order_tradeId= order_trade['orderId']
+            if order_trade['orderId'] != self.last_order_tradeId:
+                self.sTrade = self.sTrade + 1
+                self.last_order_tradeId= order_trade['orderId']
         
         trend, entry_signal, exit_signal = self.analyze_trend_and_signals(candles=candles)
-        print_ear = f"Ear: {float(ear):.{3}f} = {asset_secundary}: {float(fiat):.{2}f} + {asset_primary}: {float(quantity):.{8}f}"
+        print_ear = f"[{self.sTrade}] Ear: {float(ear):.{3}f} = {asset_secundary}: {float(fiat):.{2}f} + {asset_primary}: {float(quantity):.{8}f}"
         print_signals= f"Alert: [{trend}] band:[{alert_band}] mfi:[{alert_mfi}]"
         print_price_market=  f"Price market: {round(price_market, 2)}"
         print_alert=""
         print_msg = ""
-        #price sell***
+        
         stopPriceSide, priceSide = self.stop_price(side="SELL", price=price_market, perc_stop=perc_stopSide, perc_price=perc_priceSide)
         stopPriceSell=  stopPriceSide
         priceSell= priceSide
-        #priceBuy *****
+        
         stopPriceSide, priceSide = self.stop_price(side="BUY", price=price_market, perc_stop=perc_stopSide, perc_price=perc_priceSide)
         stopPriceBuy=  stopPriceSide
         priceBuy= priceSide
@@ -557,7 +567,7 @@ class BotBinance:
             aux_price = float(cancel_order['price'])
             aux_side = cancel_order['side']
             print_alert= f" {print_signals} | buy price: {round(aux_price,2)}"    
-            if (last_trend=="consolidation")  and ((trend == "up" and aux_side == "SELL" and priceSell > aux_price) or (trend== "down" and aux_side == "BUY" and priceBuy < aux_price)):
+            if (self.last_trend=="consolidation")  and ((trend == "up" and aux_side == "SELL" and priceSell > aux_price) or (trend== "down" and aux_side == "BUY" and priceBuy < aux_price)):
                 if self.get_orderId(orderId= orderId)['status']  == "NEW": 
                     rs= self.cancel_orderId(orderId= orderId)
                     if rs["status"]=="CANCELED":
@@ -566,7 +576,7 @@ class BotBinance:
             if price_buy > 0 and (quantity > price_min_sell and fiat < price_min_buy):
                 perc_stop_loss= round(float(self.percPro(last_price=price_buy, price=priceSell)),2)
                 print_alert=f" {print_signals} | buy price: {price_buy} perc:{perc_stop_loss}"
-                if last_trend !="up" and trend !="up" and alert_mfi== "down" and perc_stop_loss > perc_binance and priceSell > price_buy:
+                if self.last_trend !="up" and trend !="up" and alert_mfi== "down" and perc_stop_loss > perc_binance and priceSell > price_buy:
                     result = self.new_order(side="SELL",type="STOP_LOSS_LIMIT", quantity= float(math.floor(quantity/price_min_sell)* price_min_sell), stopPrice= stopPriceSell, price=priceSell, mode=self.mode_Soft)                                
                     if len(result)>0:
                         rs =self.get_orderId(orderId= result["orderId"])
@@ -575,13 +585,13 @@ class BotBinance:
                 perc_stop_loss= round(float(self.percPro(last_price=price_buy, price=priceBuy)),2)
                 print_alert=f" {print_signals} |  buy price: {price_buy}"
                 if trend=="up" and entry_signal==True and alert_sma != "down" and alert_macd !="down_div" and alert_mfi== "up" and alert_band=="up" and  price_market < lowerband.iloc[-1]: 
-                    print_msg=f" buscando precio de compra... al precio: {last_price_market} | alert: {alert_band}"
+                    print_msg=f" buscando precio de compra... al precio: {self.last_price_market} | alert: {alert_band}"
                     result = self.new_order(side="BUY",type="STOP_LOSS_LIMIT",quantity= buy_quantity, stopPrice= stopPriceBuy,price=priceBuy, mode=self.mode_Soft)
                     if len(result)>0:
                         rs =self.get_orderId(orderId= result["orderId"])
                         print_msg=f"order type: {rs['type']} | ID: {rs['orderId']} | status: {rs['status']} | price:{round(float(rs['price']),2)}"
 
-        last_trend= trend
-        last_price_market = price_market
-        
-        return sTrade, last_order_tradeId, last_trend, last_price_market, closes, upperband, lowerband, smaS, smaM, smaL, print_msg, print_alert, print_ear, print_price_market, candles, price_market
+        self.last_trend= trend
+        self.last_price_market = price_market
+        last_price_market=self.last_price_market
+        return  closes, upperband, lowerband, smaS, smaM, smaL, print_msg, print_alert, print_ear, print_price_market, candles, price_market, last_price_market
